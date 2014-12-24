@@ -152,12 +152,11 @@
 #
 #-----------------------------------------------------------------------------
 
+import datetime
 import urlparse
 import copy
 import warnings
 from xml.parsers import expat
-from time import strptime
-from calendar import timegm
 
 import requests
 
@@ -436,10 +435,10 @@ def _autocast(key, value):
 
     if len(value) == 19 and value[10] == ' ':
         # it could be a date string
+        if value == "0001-01-01 00:00:00":
+            return None
         try:
-            return max(0, int(timegm(strptime(value, "%Y-%m-%d %H:%M:%S"))))
-        except OverflowError:
-            pass
+            return datetime.datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
         except ValueError:
             pass
 
