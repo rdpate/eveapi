@@ -148,24 +148,20 @@
 #
 # Requirements:
 #   Python 2.4+
+#   requests
 #
 #-----------------------------------------------------------------------------
 
-import httplib
 import urlparse
-import urllib
 import copy
 import warnings
-
 from xml.parsers import expat
 from time import strptime
 from calendar import timegm
 
-proxy = None
-proxySSL = False
+import requests
 
-_default_useragent = "eveapi.py/1.3"
-_useragent = None  # use set_user_agent() to set this.
+_default_user_agent = "eveapi.py/1.3"
 
 #-----------------------------------------------------------------------------
 
@@ -177,11 +173,6 @@ def set_cast_func(func):
     """
     global _castfunc
     _castfunc = _autocast if func is None else func
-
-def set_user_agent(user_agent_string):
-    """Sets a User-Agent for any requests sent by the library."""
-    global _useragent
-    _useragent = user_agent_string
 
 
 class Error(StandardError):
@@ -201,43 +192,50 @@ class ServerError(Error):
     pass
 
 
-def EVEAPIConnection(url="api.eveonline.com", cacheHandler=None, proxy=None, proxySSL=False):
+def EVEAPIConnection(url="api.eveonline.com", cacheHandler=None, session=None, user_agent=None):
     # Creates an API object through which you can call remote functions.
     #
     # The following optional arguments may be provided:
     #
     # url - root location of the EVEAPI server
     #
-    # proxy - (host,port) specifying a proxy server through which to request
-    #         the API pages. Specifying a proxy overrides default proxy.
+    # session - requests.Session
     #
-    # proxySSL - True if the proxy requires SSL, False otherwise.
+    # user_agent - string identifying your program, according to
+    #   http://tools.ietf.org/html/rfc7231#section-5.5.3
+    #
+    #   Examples:
+    #       awesome-sauce/4.2
+    #       awesome-sauce/beta
+    #       awesome-sauce/0.1 (contact-mail@example.com)
+    #
+    #   As in the last example, a comment in parens with an email or URL
+    #   may allow CCP to contact you in case of a problem.
     #
     # cacheHandler - an object which must support the following interface:
     #
-    #      retrieve(host, path, params)
+    #   retrieve(host, path, params)
     #
-    #          Called when eveapi wants to fetch a document.
-    #          host is the address of the server, path is the full path to
-    #          the requested document, and params is a dict containing the
-    #          parameters passed to this api call (keyID, vCode, etc).
-    #          The method MUST return one of the following types:
+    #       Called when eveapi wants to fetch a document.
+    #       host is the address of the server, path is the full path to
+    #       the requested document, and params is a dict containing the
+    #       parameters passed to this api call (keyID, vCode, etc).
+    #       The method MUST return one of the following types:
     #
-    #           None - if your cache did not contain this entry
-    #           str/unicode - eveapi will parse this as XML
-    #           Element - previously stored object as provided to store()
-    #           file-like object - eveapi will read() XML from the stream.
+    #        None - if your cache did not contain this entry
+    #        str/unicode - eveapi will parse this as XML
+    #        Element - previously stored object as provided to store()
+    #        file-like object - eveapi will read() XML from the stream.
     #
-    #      store(host, path, params, doc, obj)
+    #   store(host, path, params, doc, obj)
     #
-    #          Called when eveapi wants you to cache this item.
-    #          You can use obj to get the info about the object (cachedUntil
-    #          and currentTime, etc) doc is the XML document the object
-    #          was generated from. It's generally best to cache the XML, not
-    #          the object, unless you pickle the object. Note that this method
-    #          will only be called if you returned None in the retrieve() for
-    #          this object.
-    #
+    #       Called when eveapi wants you to cache this item.
+    #       You can use obj to get the info about the object (cachedUntil
+    #       and currentTime, etc) doc is the XML document the object
+    #       was generated from. It's generally best to cache the XML, not
+    #       the object, unless you pickle the object. Note that this method
+    #       will only be called if you returned None in the retrieve() for
+    #       this object.
 
     if not url.startswith("http"):
         url = "https://" + url
@@ -246,10 +244,15 @@ def EVEAPIConnection(url="api.eveonline.com", cacheHandler=None, proxy=None, pro
         p.path = p.path[:-1]
     ctx = _RootContext(None, p.path, {}, {})
     ctx._handler = cacheHandler
-    ctx._scheme = p.scheme
+    ctx._base_url = url
     ctx._host = p.netloc
-    ctx._proxy = proxy or globals()["proxy"]
-    ctx._proxySSL = proxySSL or globals()["proxySSL"]
+    # _host is later given to cache handler
+    session = session or requests.Session()
+    ctx._session = session
+    if user_agent is None:
+        warnings.warn("No User-Agent set! Please provide a user_agent.", stacklevel=2)
+        user_agent = _default_user_agent
+    session.headers["User-Agent"] = "{} {}".format(user_agent, session.headers.get("User-Agent", "")).strip()
     return ctx
 
 
@@ -295,9 +298,6 @@ def _ParseXML(response, fromContext, storeFunc):
     result._meta = obj
 
     return result
-
-
-
 
 
 #-----------------------------------------------------------------------------
@@ -388,41 +388,18 @@ class _RootContext(_Context):
             response = None
 
         if response is None:
-            if not _useragent:
-                warnings.warn("No User-Agent set! Please use the set_user_agent() module-level function before accessing the EVE API.", stacklevel=3)
-
-            if self._proxy is None:
-                req = path
-                if self._scheme == "https":
-                    conn = httplib.HTTPSConnection(self._host)
-                else:
-                    conn = httplib.HTTPConnection(self._host)
-            else:
-                req = self._scheme+'://'+self._host+path
-                if self._proxySSL:
-                    conn = httplib.HTTPSConnection(*self._proxy)
-                else:
-                    conn = httplib.HTTPConnection(*self._proxy)
-
             if kw:
-                conn.request("POST", req, urllib.urlencode(kw), {"Content-type": "application/x-www-form-urlencoded", "User-Agent": _useragent or _default_useragent})
+                response = self._root._session.post(self._root._base_url + path, data=kw)
             else:
-                conn.request("GET", req, "", {"User-Agent": _useragent or _default_useragent})
-
-            response = conn.getresponse()
-            if response.status != 200:
-                if response.status == httplib.NOT_FOUND:
-                    raise AttributeError("'%s' not available on API server (404 Not Found)" % path)
-                elif response.status == httplib.FORBIDDEN:
-                    raise AuthenticationError(response.status, 'HTTP 403 - Forbidden')
-                else:
-                    raise ServerError(response.status, "'%s' request failed (%s)" % (path, response.reason))
-
-            if cache:
-                store = True
-                response = response.read()
-            else:
-                store = False
+                response = self._root._session.get(self._root._base_url + path)
+            if response.status_code == 404:
+                raise AttributeError("'{}' not available on API server ({})".format(path, response.reason))
+            elif response.status_code == 403:
+                raise AuthenticationError(response.status_code, response.reason)
+            elif response.status_code != 200:
+                raise ServerError(response.status_code, "'{}' request failed ({})".format(path, response.reason))
+            response = response.content
+            store = bool(cache)
         else:
             store = False
 
@@ -707,8 +684,6 @@ class _Parser(object):
         return
 
 
-
-
 #-----------------------------------------------------------------------------
 # XML Data Containers
 #-----------------------------------------------------------------------------
@@ -886,7 +861,6 @@ class Rowset(object):
 
     def __setstate__(self, state):
         self._cols, self._rows = state
-
 
 
 class IndexRowset(Rowset):
